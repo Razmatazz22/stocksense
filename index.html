@@ -590,13 +590,184 @@ const PM = [
   'Concall Sentiment','Google Trends','Jobs & App Signal','Regulatory Risk','Global Macro','News Sentiment'
 ];
 
-// ─── STOCK DATABASE ───────────────────────────
-// params[18]: T1(0-6) + T2(7-11) + T3(12-17 default 0.5=neutral)
-// T3 always starts at 0.5 (neutral) — user fills in manually
-const DB = [
-  // IT
-  {n:'TCS',t:'TCS.NS',s:'it',sl:'💻 IT',p:3432,h52:4592,l52:3056,pe:24,fii:13.2,dii:20.1,
-   params:[1,1,1,1,1,1,1, 1,1,1,1,1, .5,.5,.5,.5,.5,.5]},
+// ─── LIVE NSE DATABASE ────────────────────────
+// No more hardcoded stocks. DB is built dynamically from:
+// 1. NSE EQUITY_L.csv via our Render backend (live company names & tickers)
+// 2. Live prices fetched per stock via yfinance
+// 3. Scoring params derived from live price data + sector mapping
+
+// Sector mapping — maps NSE industry keywords to our sectors
+const SECTOR_MAP = [
+  {kw:['BANK','FINANC','NBFC','HDFC','ICICI','KOTAK','AXIS','SBI','FEDERAL','INDUS','CANARA','BAJAJ FIN'],s:'banking',sl:'🏦 Banking'},
+  {kw:['TECH','INFY','WIPRO','TCS','HCL','MPHASIS','COFORGE','PERSISTENT','HEXAWARE','LTIM'],s:'it',sl:'💻 IT'},
+  {kw:['PHARMA','DRUG','CIPLA','LUPIN','SUNPHARMA','DIVI','TORRENT','LAURUS','DR REDDY','ALKEM'],s:'pharma',sl:'💊 Pharma'},
+  {kw:['MOTOR','AUTO','MARUTI','TATA MOT','MAHINDRA','HERO','BAJAJ AUTO','TVS','EICHER','JBM','OLECTRA','MRF'],s:'auto',sl:'🚗 Auto/EV'},
+  {kw:['POWER','ENERGY','NTPC','ONGC','RELIANCE','ADANI GREEN','ADANI POWER','TATA POWER','SOLAR','RENEW','PRAJ','OIL'],s:'energy',sl:'⚡ Energy'},
+  {kw:['STEEL','METALS','COPPER','ZINC','ALUMIN','HIND ZINC','VEDANTA','JSW STEEL','TATA STEEL','HINDALCO','NMDC','GRAVITA'],s:'metals',sl:'⛏️ Metals'},
+  {kw:['INFRA','L&T','ADANI PORT','IRCON','IRFC','RVNL','NBCC','POLYCAB','TOWER','INDUS TOWER','AIRPORT','GMRAIRPORT'],s:'infra',sl:'🏗️ Infra'},
+  {kw:['FMCG','HUL','ITC','NESTLE','DABUR','MARICO','BRITANNIA','COLGATE','EMAMI','VARUN BEV','GODREJ'],s:'fmcg',sl:'🛒 FMCG'},
+  {kw:['RETAIL','ZOMATO','ETERNAL','DMART','TRENT','NYKAA','CANTABIL','FASHION','AVENUE SUPER'],s:'retail',sl:'🛍️ Retail'},
+];
+
+function getSector(name, symbol) {
+  const u = (name + ' ' + symbol).toUpperCase();
+  for (const sec of SECTOR_MAP) {
+    if (sec.kw.some(k => u.includes(k))) return {s: sec.s, sl: sec.sl};
+  }
+  return {s: 'other', sl: '📊 Other'};
+}
+
+// Default params for a stock when we don't have detailed data
+// Will be refined by live price once fetched
+function defaultParams(price, high52, low52) {
+  const pct = high52 ? (price - high52) / high52 : -0.2;
+  const p52w = (pct >= -0.25 && pct <= -0.05) ? 1 : 0;
+  return [
+    0,    // P0: 200 DMA — unknown without chart data
+    p52w, // P1: 52W position — derived from live price
+    0.5,  // P2: Rel strength — neutral default
+    0.5,  // P3: Volume — neutral default
+    0.5,  // P4: RSI — neutral default
+    0,    // P5: Base formation — unknown
+    0,    // P6: MACD — unknown
+    0.5,  // P7: FII — neutral default (no data)
+    0.5,  // P8: DII — neutral default
+    0.5,  // P9: Sector tailwind — neutral
+    0.5,  // P10: Earnings — neutral
+    0.5,  // P11: Governance — neutral
+    0.5,0.5,0.5,0.5,0.5,0.5  // T3: all neutral
+  ];
+}
+
+// Nifty 500 symbols — these are our primary screening universe
+// Sourced from NSE index composition (updated May 2026)
+// These are SYMBOLS only — names come live from NSE
+const NIFTY500_SYMBOLS = [
+  // Nifty 50
+  'RELIANCE','TCS','HDFCBANK','ICICIBANK','BHARTIARTL','SBIN','INFY','LICI','HINDUNILVR','ITC',
+  'KOTAKBANK','LT','HCLTECH','MARUTI','BAJFINANCE','AXISBANK','SUNPHARMA','TITAN','ULTRACEMCO','ONGC',
+  'POWERGRID','NTPC','WIPRO','NESTLEIND','JSWSTEEL','TATAMOTORS','M&M','BAJAJFINSV','ADANIPORTS','COALINDIA',
+  'TECHM','ASIANPAINT','TATACONSUM','BRITANNIA','CIPLA','DRREDDY','DIVISLAB','BAJAJ-AUTO','EICHERMOT','HEROMOTOCO',
+  'GRASIM','APOLLOHOSP','SHREECEM','BPCL','ADANIENT','HINDALCO','TATASTEEL','INDUSINDBK','SBILIFE','HDFCLIFE',
+  // Nifty Next 50
+  'SIEMENS','HAVELLS','DABUR','MARICO','GODREJCP','COLPAL','MCDOWELL-N','BERGEPAINT','PIDILITIND','TORNTPHARM',
+  'LUPIN','BIOCON','AUROPHARMA','TATAPOWER','ADANIGREEN','ADANIPOWER','GAIL','IOC','HINDPETRO','PETRONET',
+  'INDIGO','INTERGLOBE','IRCTC','ZOMATO','ETERNAL','PAYTM','NYKAA','FSN','DMART','AVENUE',
+  'VEDL','HINDZINC','NMDC','NATIONALUM','MOIL','SAIL','JINDALSTEL','JSWENERGY','TRENT','ABFRL',
+  // Mid cap key stocks
+  'PERSISTENT','COFORGE','MPHASIS','LTIM','HEXAWARE','KPITTECH','LTTS','OFSS','RAMCOCEM','AMBUJACEM',
+  'SHRIRAMFIN','CHOLAFIN','BAJAJHLDNG','SBICARD','HDFCAMC','NIPPONLIFE','ICICIGI','HDFCERGO','STARHEALTH','NIACL',
+  'IDFCFIRSTB','BANDHANBNK','FEDERALBNK','CANBK','BANKBARODA','PNB','UNIONBANK','INDIANB','MAHABANK','UCOBANK',
+  'SUNPHARMA','AUROPHARMA','TORNTPHARM','ALKEM','ABBOTINDIA','PFIZER','SANOFI','GLAXO','IPCALAB','NATCOPHARM',
+  'JBMA','OLECTRA','TVSMOTOR','ASHOKLEY','MOTHERSON','BOSCHLTD','ESCORTS','APOLLOTYRE','CEATLTD','MRF',
+  'HINDCOPPER','GRAVITA','WELSPUN','TATAMETALI','RATNAMANI','APL APOLLO','JSPL','GMRAIRPORT','IRB','ASHOKA',
+  'POLYCAB','HAVELLS','SUPREMEIND','ASTRAL','FINOLEX','KEI','INOXGREEN','SUZLON','RPOWER','TATAPOWER',
+  'IRFC','IRCON','RVNL','NBCC','NCC','HCC','PNBHOUSING','LTFH','MANAPPURAM','MUTHOOTFIN',
+  'DIXON','AMBER','KAYNES','SYRMA','PGEL','VGUARD','CRISIL','ICRA','CARE','MSTC',
+  'PRAJIND','IOCL','GUJGASLTD','IGL','MGL','ATGL','GSPL','AEGISLOG','CASTROLIND','GULFOILLUB',
+  'CANTABIL','GOCOLORS','TRENT','SHOPERSTOP','VMART','BATAINDIA','RELAXO','METROBRAND','VCPL','PVRINOX',
+  'ZYDUSLIFE','LAURUS','DIVI','CIPLA','ALEMBICLTD','PFIZER','WOCKPHARMA','AARTIIND','SUVEN','CONCORD',
+  'IDEA','MTNL','TATACOMM','HFCL','STLTECH','TEJASNET','ROUTE','TANLA','SUBEX','ONMOBILE',
+  'CENTRALBK','IOB','BANKINDIA','SYNDIBANK','VIJAYABANK','KARURVSYA','CSBBANK','DCBBANK','RBLBANK','YESBANK',
+  'WHIRLPOOL','VOLTAS','BLUESTAR','SYMPHONY','CROMPTON','ORIENTELEC','KAJARIACER','SOMANY','CERA','HSIL',
+];
+
+// Live DB — built dynamically
+let DB = [];
+let DB_LOADED = false;
+let DB_LOADING = false;
+
+async function loadNSEDatabase() {
+  if (DB_LOADED || DB_LOADING) return;
+  DB_LOADING = true;
+
+  try {
+    // Fetch live stock list from our Render backend
+    const res = await fetch(`${RENDER_API}/stocks?limit=2000`, {
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (!res.ok) throw new Error('Stock list fetch failed');
+    const data = await res.json();
+
+    if (!data.stocks || !data.stocks.length) throw new Error('Empty stock list');
+
+    // Build DB from NSE list, filtered to our Nifty500 universe
+    const nseMap = {};
+    data.stocks.forEach(s => { nseMap[s.symbol] = s; });
+
+    DB = NIFTY500_SYMBOLS
+      .filter(sym => nseMap[sym])
+      .map(sym => {
+        const nse = nseMap[sym];
+        const sec = getSector(nse.name, sym);
+        return {
+          n:      nse.name,          // LIVE name from NSE (Eternal, not Zomato!)
+          t:      nse.ticker,        // LIVE ticker
+          s:      sec.s,
+          sl:     sec.sl,
+          p:      0,                 // filled by live price fetch
+          h52:    0,
+          l52:    0,
+          pe:     0,
+          fii:    0,
+          dii:    0,
+          params: Array(18).fill(0.5),
+          _loaded: false
+        };
+      });
+
+    // Add any symbols not found in NSE list with best-guess data
+    NIFTY500_SYMBOLS.forEach(sym => {
+      if (!nseMap[sym] && !DB.find(d => d.t === sym+'.NS')) {
+        const sec = getSector('', sym);
+        DB.push({
+          n: sym, t: sym+'.NS', s: sec.s, sl: sec.sl,
+          p:0, h52:0, l52:0, pe:0, fii:0, dii:0,
+          params: Array(18).fill(0.5), _loaded:false
+        });
+      }
+    });
+
+    DB_LOADED = true;
+    console.log(`✓ NSE DB loaded: ${DB.length} stocks (live names)`);
+
+  } catch(e) {
+    console.warn('NSE live load failed, using fallback symbols:', e.message);
+    // Fallback: build DB from symbols only, names fetched per-stock
+    DB = NIFTY500_SYMBOLS.map(sym => {
+      const sec = getSector('', sym);
+      return {
+        n: sym, t: sym+'.NS', s: sec.s, sl: sec.sl,
+        p:0, h52:0, l52:0, pe:0, fii:0, dii:0,
+        params: Array(18).fill(0.5), _loaded:false
+      };
+    });
+    DB_LOADED = true;
+  }
+
+  DB_LOADING = false;
+  populateBtSelect();
+  updateLiveCount();
+}
+
+// Enrich a stock entry with live price data from Render API
+function enrichStockWithPrice(stock, priceData) {
+  stock.p    = priceData.price;
+  stock.h52  = priceData.high52;
+  stock.l52  = priceData.low52;
+  stock.params = defaultParams(priceData.price, priceData.high52, priceData.low52);
+  stock._loaded = true;
+  stock._live   = true;
+  return stock;
+}
+
+// ─── STATE ────────────────────────────────────
+let tfMode='days', priceRange='all', sectorFilter='all', btStrat='full';
+let t3Answers = {};
+let selectedStock = null;
+let portfolio = JSON.parse(localStorage.getItem('ss18_port')||'[]');
+let btChartInst = null;
   {n:'Infosys',t:'INFY.NS',s:'it',sl:'💻 IT',p:1442,h52:1994,l52:1358,pe:22,fii:34.1,dii:14.2,
    params:[1,1,1,1,1,1,1, 1,1,1,1,1, .5,.5,.5,.5,.5,.5]},
   {n:'HCL Tech',t:'HCLTECH.NS',s:'it',sl:'💻 IT',p:1467,h52:1956,l52:1390,pe:24,fii:21.4,dii:16.3,
@@ -729,23 +900,15 @@ const DB = [
    params:[1,1,1,1,1,1,1, 1,1,1,1,1, .5,1,1,.5,.5,.5]},
   {n:'Nykaa',t:'FSN.NS',s:'retail',sl:'🛍️ Beauty',p:158,h52:234,l52:141,pe:96,fii:12.4,dii:8.4,
    params:[1,1,1,1,0,1,1, 1,0,1,1,1, .5,1,1,.5,.5,.5]},
-  {n:'Avenue Supermarts',t:'DMART.NS',s:'retail',sl:'🛍️ DMart',p:3642,h52:5484,l52:3314,pe:82,fii:14.8,dii:8.4,
-   params:[0,1,1,1,1,0,0, 1,0,1,1,1, .5,1,.5,.5,.5,.5]},
-];
-
-// ─── STATE ────────────────────────────────────
-let tfMode='days', priceRange='all', sectorFilter='all', btStrat='full';
-let t3Answers = {};   // {13:val, 14:val, ...}
-let selectedStock = null;
-let portfolio = JSON.parse(localStorage.getItem('ss18_port')||'[]');
-let btChartInst = null;
-
 // ─── INIT ─────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
   updateTf(document.getElementById('tfSlider'));
-  populateBtSelect();
   renderExitPage();
-  updateLiveCount();
+  // Load live NSE stock list on startup
+  loadNSEDatabase().then(() => {
+    updateLiveCount();
+    populateBtSelect();
+  });
 });
 
 function populateBtSelect(){
@@ -965,9 +1128,111 @@ async function refreshPrices(scored){
 }
 
 // ─── SHOW TOP 10 ──────────────────────────────
-function showTop10(){
-  const tfD=getTfDays();
-  const min=getMinScore(tfD);
+async function showTop10() {
+  if (!DB_LOADED) {
+    showToast('Loading NSE stock list... please wait');
+    await loadNSEDatabase();
+  }
+
+  const tfD = getTfDays();
+  const min  = getMinScore(tfD);
+
+  // Step 1: Filter by price range and sector from DB
+  // For unloaded stocks, we need prices first — fetch bulk
+  const candidates = DB.filter(s => inSector(s.s));
+
+  // Step 2: Fetch live prices for all candidates that don't have prices yet
+  const unloaded = candidates.filter(s => !s._loaded).slice(0, 100);
+  if (unloaded.length > 0) {
+    const sec  = document.getElementById('top10Section');
+    const meta = document.getElementById('top10Meta');
+    sec.style.display = 'block';
+    meta.textContent  = `Fetching live prices for ${unloaded.length} stocks...`;
+    document.getElementById('stockList').innerHTML =
+      `<div style="text-align:center;padding:32px;font-family:'Space Mono',monospace;font-size:11px;color:var(--gold)">
+        <div style="width:32px;height:32px;border:2px solid rgba(253,185,39,.2);border-top-color:var(--gold);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 14px"></div>
+        Fetching live NSE prices...<br><span style="color:var(--txt3);font-size:10px">First load takes ~30s while API wakes up</span>
+      </div>`;
+    sec.scrollIntoView({behavior:'smooth', block:'start'});
+
+    // Batch fetch in groups of 15
+    for (let i = 0; i < unloaded.length; i += 15) {
+      const batch   = unloaded.slice(i, i + 15);
+      const tickers = batch.map(s => s.t).join(',');
+      try {
+        const res = await fetch(`${RENDER_API}/prices?tickers=${encodeURIComponent(tickers)}`, {
+          signal: AbortSignal.timeout(20000)
+        });
+        if (res.ok) {
+          const data = await res.json();
+          batch.forEach(s => {
+            const d = data[s.t];
+            if (d && d.status === 'live') enrichStockWithPrice(s, d);
+          });
+        }
+      } catch(e) { /* continue with what we have */ }
+    }
+  }
+
+  // Step 3: Score and filter
+  const scored = DB
+    .filter(s => s._loaded && s.p > 0 && inRange(s.p) && inSector(s.s))
+    .map(s => {
+      const p     = scoreStock18(s, tfD);
+      const total = getTotalScore(p);
+      const t1    = p.slice(0,7).reduce((a,b)=>a+b,0);
+      const t2    = p.slice(7,12).reduce((a,b)=>a+b,0);
+      const t3    = p.slice(12).reduce((a,b)=>a+b,0);
+      return {...s, liveParams:p, total, t1, t2, t3};
+    })
+    .filter(s => s.total >= min)
+    .sort((a,b) => b.total - a.total || b.p - a.p)
+    .slice(0, 10);
+
+  const sec  = document.getElementById('top10Section');
+  const list = document.getElementById('stockList');
+  const meta = document.getElementById('top10Meta');
+  document.getElementById('scorePanel').style.display = 'none';
+
+  if (!scored.length) {
+    meta.textContent = '0 stocks qualify';
+    list.innerHTML = `<div style="text-align:center;padding:32px;color:var(--txt3);font-family:'Space Mono',monospace;font-size:12px;line-height:1.8">No stocks meet ${min}/18<br>for ${getTfLabel()}.<br>Try different filters.</div>`;
+    sec.style.display = 'block';
+    return;
+  }
+
+  meta.textContent = scored.length + ' qualify · min ' + min + '/18 · ' + getTfLabel() + ' · 🟢 LIVE NSE';
+
+  list.innerHTML = scored.map((s,i) => {
+    const fromH = ((s.p - s.h52) / s.h52 * 100).toFixed(1);
+    const conv  = getConviction(s.total);
+    const barW  = Math.round(s.total/18*100);
+    return `<div class="sitem fu" style="animation-delay:${i*.04}s;opacity:0" onclick="openPanel('${s.t}')">
+      <div class="sitem-rank">${i+1}</div>
+      <div class="sitem-info">
+        <div class="sitem-sector">${s.sl}</div>
+        <div class="sitem-name">${s.n}</div>
+        <div class="sitem-meta">
+          <span>${s.t}</span>
+          <span style="color:var(--gold)">${s.total.toFixed(1)}/18</span>
+          <span class="live-dot" style="display:inline-block"></span>
+          <span class="conv-badge conv-${conv.cls}">${conv.label}</span>
+        </div>
+        <div class="sitem-chg" id="chg-${s.t}" style="color:${s._live?(s.chgPct>=0?'var(--green)':'var(--red)'):'var(--txt3)'}">
+          ${s._live?(s.chgPct>=0?'+':'')+s.chgPct?.toFixed(2)+'% today':''}
+        </div>
+      </div>
+      <div class="sitem-right">
+        <div class="sitem-price" id="price-${s.t}">₹${s.p.toLocaleString('en-IN',{maximumFractionDigits:0})}</div>
+        <div class="sitem-from ${parseFloat(fromH)<0?'dn':'up'}" id="from-${s.t}">${fromH}% high</div>
+      </div>
+      <div class="score-bar" style="width:${barW}%"></div>
+    </div>`;
+  }).join('');
+
+  sec.style.display = 'block';
+  sec.scrollIntoView({behavior:'smooth', block:'start'});
+}
 
   const scored=DB
     .filter(s=>inRange(s.p)&&inSector(s.s))
